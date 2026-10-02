@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SteamOS-ARM-RM6 <exclaim_plethora227@simplelogin.com>
+Date: Fri, 2 Oct 2026 12:20:00 -0500
+Subject: [PATCH] power: supply: qcom_battmgr: battery time on the REDMAGIC 6
+
+Steam and UPower had no time left on the REDMAGIC 6 (SM8350 battmgr):
+
+- The firmware never sends BATTMGR_BAT_INFO, so the charge unit stayed
+  mWh and charge_full / charge_full_design read -ENODATA, and there was
+  no charge_now. UPower had 0 Wh and nothing to divide. Set the unit to
+  mAh and report BATT_CHG_COUNTER (the remaining charge, uAh) as
+  CHARGE_NOW (the SM8550 kernels here carry the same fix).
+- The instantaneous current swings 2.5x between reads (234-579 mA at
+  rest), so a projection from one sample jumps around. While
+  discharging, report the current the firmware's averaged time to empty
+  implies (remaining charge / time left), also as on SM8550.
+- BATT_POWER_NOW is not the battery power on this firmware (45-52 W on a
+  1.5-7 W load). Report voltage x current instead.
+- The firmware says Charging whenever a charger is attached, even one
+  too weak for the load (a PC port), so UPower showed hours to full
+  while the battery ran down. On a net drain its averaged times say so
+  (a time to empty, no time to full): report Discharging then.
+
+Measured on an NX669J on a 500 mA PC port: charge_full 5106000,
+charge_now 977799, current_now steady at -375607 (977799 uAh / 9268 s),
+power_now 1.1-2.1 W, status Discharging, UPower 1.8 h to empty against
+the firmware's 2.0 h.
+
+Every change is gated on QCOM_BATTMGR_SM8350; the other variants behave
+as before.
+
+---
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -438,6 +438,7 @@
+ 	[POWER_SUPPLY_PROP_TEMP] = BATT_TEMP,
+ 	[POWER_SUPPLY_PROP_TECHNOLOGY] = BATT_TECHNOLOGY,
+ 	[POWER_SUPPLY_PROP_CHARGE_COUNTER] =  BATT_CHG_COUNTER,
++	[POWER_SUPPLY_PROP_CHARGE_NOW] = BATT_CHG_COUNTER,
+ 	[POWER_SUPPLY_PROP_CYCLE_COUNT] = BATT_CYCLE_COUNT,
+ 	[POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN] =  BATT_CHG_FULL_DESIGN,
+ 	[POWER_SUPPLY_PROP_CHARGE_FULL] = BATT_CHG_FULL,
+@@ -464,6 +465,28 @@
+ 
+ 	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, prop, 0);
++	/*
++	 * SM8350 (REDMAGIC 6): status, current_now and power_now are worked
++	 * out from other properties too, see qcom_battmgr_bat_get_property()
++	 */
++	if (!ret && battmgr->variant == QCOM_BATTMGR_SM8350) {
++		switch (psp) {
++		case POWER_SUPPLY_PROP_STATUS:
++			qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TTE_AVG, 0);
++			qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TTF_AVG, 0);
++			break;
++		case POWER_SUPPLY_PROP_CURRENT_NOW:
++			qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TTE_AVG, 0);
++			qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_CHG_COUNTER, 0);
++			break;
++		case POWER_SUPPLY_PROP_POWER_NOW:
++			qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_VOLT_NOW, 0);
++			qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_CURR_NOW, 0);
++			break;
++		default:
++			break;
++		}
++	}
+ 	mutex_unlock(&battmgr->lock);
+ 
+ 	return ret;
+@@ -530,6 +553,19 @@
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_STATUS:
+ 		val->intval = battmgr->status.status;
++		/*
++		 * The SM8350 (REDMAGIC 6) firmware says Charging whenever a
++		 * charger is attached, even one too weak for the load (a PC
++		 * port), so UPower and Steam showed hours to full while the
++		 * battery ran down. Its averaged times tell the two apart: on a
++		 * net drain it has a time to empty and no time to full.
++		 */
++		if (battmgr->variant == QCOM_BATTMGR_SM8350 &&
++		    val->intval == POWER_SUPPLY_STATUS_CHARGING &&
++		    battmgr->status.charge_time == (unsigned int)-1 &&
++		    battmgr->status.discharge_time > 0 &&
++		    battmgr->status.discharge_time < 100 * 3600)
++			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
+ 		val->intval = battmgr->info.charge_type;
+@@ -560,9 +596,32 @@
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+ 		val->intval = battmgr->status.current_now;
++		/*
++		 * SM8350 (REDMAGIC 6), discharging: the instantaneous current
++		 * swings 2.5x from one read to the next, so a time left from one
++		 * sample jumps around. Report the current the firmware's own
++		 * averaged time to empty implies (remaining charge / time left)
++		 * instead. Not while charging, and not when the firmware has no
++		 * average (-1).
++		 */
++		if (battmgr->variant == QCOM_BATTMGR_SM8350 &&
++		    battmgr->status.current_now < 0 &&
++		    battmgr->status.capacity > 0 &&
++		    battmgr->status.discharge_time > 60 &&
++		    battmgr->status.discharge_time < 100 * 3600)
++			val->intval = -(int)div_u64((u64)battmgr->status.capacity * 3600,
++						    battmgr->status.discharge_time);
+ 		break;
+ 	case POWER_SUPPLY_PROP_POWER_NOW:
+ 		val->intval = battmgr->status.power_now;
++		/*
++		 * The SM8350 (REDMAGIC 6) firmware's BATT_POWER_NOW is not the
++		 * battery power: it reads 45-52 W on a 1.5-7 W load. Report
++		 * voltage x current (uW) instead, positive like the firmware's.
++		 */
++		if (battmgr->variant == QCOM_BATTMGR_SM8350)
++			val->intval = div_u64((u64)battmgr->status.voltage_now *
++					      abs(battmgr->status.current_now), 1000000);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+ 		if (unit != QCOM_BATTMGR_UNIT_mAh)
+@@ -875,6 +934,7 @@
+ 	POWER_SUPPLY_PROP_TEMP,
+ 	POWER_SUPPLY_PROP_TECHNOLOGY,
+ 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
++	POWER_SUPPLY_PROP_CHARGE_NOW,
+ 	POWER_SUPPLY_PROP_CYCLE_COUNT,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL,
+@@ -1443,6 +1503,9 @@
+ 			break;
+ 		case BATT_CHG_COUNTER:
+ 			battmgr->info.charge_count = le32_to_cpu(resp->intval.value);
++			/* SM8350 (REDMAGIC 6): this is the remaining charge (uAh) */
++			if (battmgr->variant == QCOM_BATTMGR_SM8350)
++				battmgr->status.capacity = battmgr->info.charge_count;
+ 			break;
+ 		case BATT_CYCLE_COUNT:
+ 			battmgr->info.cycle_count = le32_to_cpu(resp->intval.value);
+@@ -1690,6 +1753,10 @@
+ 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+ 					     "failed to register wireless charing power supply\n");
+ 	} else {
++		/* SM8350 (REDMAGIC 6): no BATTMGR_BAT_INFO from this firmware, it reports mAh */
++		if (battmgr->variant == QCOM_BATTMGR_SM8350)
++			battmgr->unit = QCOM_BATTMGR_UNIT_mAh;
++
+ 		if (battmgr->variant == QCOM_BATTMGR_SM8550)
+ 			psy_desc = &sm8550_bat_psy_desc;
+ 		else

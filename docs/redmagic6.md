@@ -127,6 +127,12 @@ enough if Android was installed before.
   ([ztemt/NX669J-kernel](https://github.com/ztemt/NX669J-kernel));
   `tools/gen-panel-seq.py` turns the panel init sequences from the stock dtbo
   into C tables.
+- **Battery**: the ADSP firmware never sends its battery info, misreports
+  `power_now` and says Charging on any charger, even one too weak for the
+  load. A `qcom_battmgr` patch reports the charge in mAh with `charge_now`, a
+  steady discharge current from the firmware's own averaged time to empty,
+  `power_now` as voltage × current, and Discharging on a net drain, so
+  UPower and Steam can work out the time left.
 - **Boot**: Nubia's layout (`mkbootimg-v3.py`): the kernel in a v3 `boot`,
   the DTB, initramfs and cmdline in a v3 `vendor_boot`. With a valid `dtbo`
   the ABL overlays Nubia's board dtbo and the Haven hypervisor's overlays onto
