@@ -126,7 +126,11 @@ enough if Android was installed before.
   Values come from Nubia's stock DT and kernel source
   ([ztemt/NX669J-kernel](https://github.com/ztemt/NX669J-kernel));
   `tools/gen-panel-seq.py` turns the panel init sequences from the stock dtbo
-  into C tables.
+  into C tables. The DT also carries the CPU capacities and energy model from
+  the stock DTB (`sm8350.dtsi` has none), so the scheduler knows the X1 and
+  A78s from the A55s. The GPU, thermal and UFS fixes the 8 Gen 2 and 8 Elite
+  kernels carry apply here too (game queues no longer starve Steam's UI, the
+  GMU drops its power votes when the GPU idles).
 - **Battery**: the ADSP firmware never sends its battery info, misreports
   `power_now` and says Charging on any charger, even one too weak for the
   load. A `qcom_battmgr` patch reports the charge in mAh with `charge_now`, a
@@ -147,4 +151,10 @@ enough if Android was installed before.
   Mode in landscape, like on the Steam Deck.
 - **Userspace**: the shared rootfs plus `sm8350-overlay`
   (`scripts/apply-overlays-sm8350.sh`); the shared scripts that know about
-  the phone match the DT model "REDMAGIC 6".
+  the phone match the DT model "REDMAGIC 6". On a release rootfs the script
+  also brings in the later shared fixes that apply to the phone (Decky
+  v3.2.10, Handheld Control, the focus fix for minimised games, no Steam
+  Frame VR layers, Windows games can't change the device volume), and the
+  overlay has the 8 Gen 2 image's tuning: services on all eight cores, zstd
+  zram sized to RAM, the TEO cpuidle governor, no systemd tag on backlight
+  events.

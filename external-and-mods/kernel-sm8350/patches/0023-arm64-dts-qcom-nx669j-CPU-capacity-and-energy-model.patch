@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SteamOS-ARM-RM6 <exclaim_plethora227@simplelogin.com>
+Date: Fri, 2 Oct 2026 19:30:00 -0500
+Subject: [PATCH] arm64: dts: qcom: nx669j: CPU capacity and energy model
+
+sm8350.dtsi has no capacity-dmips-mhz or dynamic-power-coefficient (the
+SM8250, SM8550 and SM8650 ones do), so every CPU reports cpu_capacity
+1024: the scheduler treats the four Cortex-A55s like the A78s and the X1,
+places game threads on them just as readily, and there is no energy model
+for energy-aware scheduling. konkrd's big-core boost also found no big
+cores and pinned games to all eight.
+
+Take the values from Nubia's stock Lahaina DTB: A55 1024/100, A78
+1946/499, X1 2048/760.
+
+---
+--- a/arch/arm64/boot/dts/qcom/sm8350-nubia-nx669j.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-nubia-nx669j.dts
+@@ -619,6 +619,52 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * CPU capacity and energy model, from Nubia's stock Lahaina DTB (sm8350.dtsi
++ * has neither). Without them the scheduler sees eight equal CPUs
++ * (cpu_capacity 1024 everywhere): game threads land on the A55s as readily
++ * as on the X1, and schedutil gets no energy-aware placement.
++ */
++&cpu0 {
++	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
++};
++
++&cpu1 {
++	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
++};
++
++&cpu2 {
++	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
++};
++
++&cpu3 {
++	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
++};
++
++&cpu4 {
++	capacity-dmips-mhz = <1946>;
++	dynamic-power-coefficient = <499>;
++};
++
++&cpu5 {
++	capacity-dmips-mhz = <1946>;
++	dynamic-power-coefficient = <499>;
++};
++
++&cpu6 {
++	capacity-dmips-mhz = <1946>;
++	dynamic-power-coefficient = <499>;
++};
++
++&cpu7 {
++	capacity-dmips-mhz = <2048>;
++	dynamic-power-coefficient = <760>;
++};
++
+ &gpi_dma0 {
+ 	status = "okay";
+ };

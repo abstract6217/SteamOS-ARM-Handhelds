@@ -1,0 +1,7 @@
+# Every brightness change sends a uevent, and Steam's dimming and slider send
+# a lot of them. With the systemd tag each one becomes a D-Bus signal, which
+# makes Wine's mount manager re-read every UFS partition (96 on this phone)
+# from udisksd in every Proton game. Nothing here needs systemd to track
+# backlights: gamescope and KDE write the brightness through sysfs. Named to
+# sort after 99-systemd.rules. (Same as the 8 Gen 2 image.)
+SUBSYSTEM=="backlight", TAG-="systemd"

@@ -9,7 +9,8 @@
 #   - sm8350-overlay (gamescope panel profile, Wi-Fi/BT addresses and board
 #     data, lights, sleep default, /home on the root partition)
 #   - release rootfs (v1.2 and older) only: the shared files that know about
-#     the REDMAGIC 6 in this tree are patched in place (see below)
+#     the REDMAGIC 6 in this tree are patched in place, and the later shared
+#     fixes that apply to the phone are brought in (see below)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,6 +96,29 @@ if "CLOCK_BOOTTIME" not in s:
         "            if offset - sleep_offset > 0.5:\n"
         "                last_standby = time.monotonic()      # resumed from s2idle\n"
         "            sleep_offset = offset\n", 1)
+# No full-speed fan burst on power off: the failsafe is for restarts and
+# crashes, the phone is off a few seconds after a shutdown stops konkrd.
+if "def shutting_down" not in s:
+    old = "    def stop(self, *_):\n        self.fan.failsafe_now()\n"
+    if old not in s:
+        sys.exit("konkrd: stop handler not found, update this script")
+    s = s.replace(old,
+        "    def stop(self, *_):\n"
+        "        if shutting_down():\n"
+        "            log(\"stopped (shutdown, fan left as is)\")\n"
+        "            sys.exit(0)\n"
+        "        self.fan.failsafe_now()\n", 1)
+    s = s.replace("\n# ------------------------------------------------------------------ gpu ----\n",
+        "\ndef shutting_down() -> bool:\n"
+        "    try:\n"
+        "        r = subprocess.run([\"systemctl\", \"is-system-running\"], capture_output=True,\n"
+        "                           text=True, timeout=2)\n"
+        "        return r.stdout.strip() == \"stopping\"\n"
+        "    except (OSError, subprocess.SubprocessError):\n"
+        "        return False\n"
+        "\n\n# ------------------------------------------------------------------ gpu ----\n", 1)
+    if "def shutting_down" not in s:
+        sys.exit("konkrd: gpu section not found, update this script")
 open(d, "w").write(s)
 s = open(svc).read()
 if "nx669j_fan" not in s:
@@ -102,6 +126,11 @@ if "nx669j_fan" not in s:
     if old not in s:
         sys.exit("konkrd.service: failsafe not found, update this script")
     s = s.replace(old, 'case "$(cat $d/name 2>/dev/null)" in pwmfan|nx669j_fan) echo 255 > $d/pwm1;; esac;', 1)
+if "is-system-running" not in s:
+    old = "ExecStopPost=/bin/sh -c 'for d in"
+    if old not in s:
+        sys.exit("konkrd.service: failsafe not found, update this script")
+    s = s.replace(old, "ExecStopPost=/bin/sh -c '[ \"$(systemctl is-system-running 2>/dev/null)\" = stopping ] && exit 0; for d in", 1)
 # v1.2 only starts konkrd on the models it knows.
 old = '"KONKR Pocket FIT|AYANEO Pocket S2"'
 if "REDMAGIC 6" not in s and old in s:
@@ -166,5 +195,53 @@ fi
 # Self-contained script: LE pads need the adapter powered through mgmt.
 install -m0755 "$OVL/usr/lib/steamos/sm8550-bluetooth-setup" \
   "$R/usr/lib/steamos/sm8550-bluetooth-setup"
+
+# ---------------------------------------------------------------------------
+# 4. Release rootfs: fixes the other devices got after v1.2, for the parts
+#    of them the REDMAGIC 6 shares. Each step is a no-op on a newer rootfs.
+# ---------------------------------------------------------------------------
+log "== shared fixes from after the release"
+# Steam starts every game with the Frame's renderpass optimizer (tuned for
+# its Adreno 750) and eye-tracked foveation layers. No headset here: drop
+# both, the loader only warns they're missing (as on the other images).
+mkdir -p "$R/usr/share/vulkan/explicit_layer.d.frame"
+for _l in VkLayer_VALVE_rpo.json VkLayer_VALVE_fdm_injection.json; do
+  if [[ -f "$R/usr/share/vulkan/explicit_layer.d/$_l" ]]; then
+    mv -f "$R/usr/share/vulkan/explicit_layer.d/$_l" "$R/usr/share/vulkan/explicit_layer.d.frame/"
+  fi
+done
+
+# konkr-focusfix: games that minimise behind Quick Access come back, and a
+# game whose focus bounces while it opens no longer hangs.
+install -m0755 "$ROOT/sm8650-overlay/usr/lib/konkr/konkr-focusfix" \
+  "$R/usr/lib/konkr/konkr-focusfix"
+
+# Decky v3.2.10-pre1: v3.2.9's bundled Python lacks http.server, socketserver
+# and configparser, so plugin backends that import them crashed (SteamGridDB).
+# Handheld Control (was KONKR Control) only shows what the device has: no
+# Pocket FIT MCU link, buttons or power LED on the phone.
+HOME_DST="$R/home/steamos"
+DECKY_VERSION=v3.2.10-pre1
+DECKY_LOADER="${ROOT}/external-and-mods/Decky/loader/PluginLoader-${DECKY_VERSION}"
+if [[ -d "$HOME_DST/homebrew/services" && "$(cat "$HOME_DST/homebrew/services/.loader.version" 2>/dev/null)" != "$DECKY_VERSION" ]]; then
+  if [[ ! -s "$DECKY_LOADER" ]]; then
+    mkdir -p "${DECKY_LOADER%/*}"
+    curl -fL -o "$DECKY_LOADER.part" \
+      "https://github.com/SteamDeckHomebrew/decky-loader/releases/download/${DECKY_VERSION}/PluginLoader" &&
+      mv "$DECKY_LOADER.part" "$DECKY_LOADER"
+  fi
+  [[ -s "$DECKY_LOADER" ]] || die "Decky loader ${DECKY_VERSION} missing and download failed"
+  install -m0755 "$DECKY_LOADER" "$HOME_DST/homebrew/services/PluginLoader"
+  printf '%s' "$DECKY_VERSION" >"$HOME_DST/homebrew/services/.loader.version"
+fi
+HC_SRC="${ROOT}/external-and-mods/Decky/sm8650/konkr-control"
+HC_DST="$HOME_DST/homebrew/plugins/konkr-control"
+if [[ -d "$HC_DST" ]]; then
+  rm -rf "$HC_DST"; mkdir -p "$HC_DST/dist"
+  install -m0644 "$HC_SRC/plugin.json" "$HC_SRC/main.py" "$HC_DST/"
+  [[ -f "$HC_SRC/package.json" ]] && install -m0644 "$HC_SRC/package.json" "$HC_DST/"
+  install -m0644 "$HC_SRC/dist/index.js" "$HC_DST/dist/"
+fi
+[[ -d "$HOME_DST/homebrew" ]] && chown -R 1000:1000 "$HOME_DST/homebrew"
 
 log "== done (kernel ${KREL})"
